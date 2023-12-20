@@ -1,39 +1,96 @@
-# Библиотеки
-import requests
-import psycopg2
+import json
+import os
+import pandas as pd
 
-conn = psycopg2.connect(
-    host     = "localhost",
-    database = "db",
-    user     = "username",
-    password = "password"
+from fastapi import FastAPI
+from fastapi import HTTPException
+from fastapi import status
+from fastapi.responses import JSONResponse
+
+from pydantic import BaseModel
+
+from sqlalchemy import create_engine
+from sqlalchemy.sql import text
+
+# Base class for number
+class Number(BaseModel):
+    number: int # recieved number
+
+# Creating PostgreSQL engine
+engine = create_engine(
+    f"postgresql://{os.environ['user']}:{os.environ['password']}@{os.environ['host']}:{os.environ['port']}/{os.environ['database']}"
 )
 
-cur = conn.cursor()
+# Creating app
+server = FastAPI()
 
-# Создание сервера
-def handle_request(request):
-    number = int(request.data)
+### -- METHODS -- ###
 
-    cur.execute("SELECT * FROM data WHERE number = %s", (number,))
+# Parsing data func
+def parse_data(data):
+    res         = data.to_json(orient="records")
+    parsed_data = json.loads(res)
+    
+    return parsed_data
 
-    if cur.fetchone() is not None:
-        return "Ошибка: Число уже поступало"
+# Processing data func
+@server.post("/process_data/")
+async def process_data(request: Number):
+    number = request.number
 
-    cur.execute("SELECT * FROM data ORDER BY id DESC LIMIT 1")
-    last_number = cur.fetchone()[1]
+    pgs_cnt = engine.connect()
+    pgs_cnt.execute(
+        text("CREATE TABLE IF NOT EXISTS Numbers (number INT);")
+    )
 
-    if number != last_number + 1:
-        return "Ошибка: Было число на единицу больше"
+    query = f"SELECT * FROM Numbers WHERE number = {number}"
+    result = pd.read_sql(query, pgs_cnt)
 
-    new_number = number + 1
-    cur.execute("INSERT INTO data (number) VALUES (%s)", (new_number,))
-    conn.commit()
-    return str(new_number)
+    # Exceptions
+    if len(result > 0):
+        raise HTTPException(
+            status_code=406, detail=f"Number {number} is already exists"
+        )
 
-# Запуск
-while True:
-    request  = requests.get("http://localhost:8000")
-    response = handle_request(request)
+    query = f"SELECT * FROM Numbers WHERE number = {number + 1};"
+    result = pd.read_sql(query, pgs_cnt)
 
-    requests.post("http://localhost:8000", data=response)
+    # Exceptions
+    if len(result) > 0:
+        raise HTTPException(
+            status_code=406, detail=f"Number {number} + 1 is already exists"
+        )
+
+    pgs_cnt.execute(
+        text(f"INSERT INTO Numbers (number) VALUES ({number});")
+    )
+
+    pgs_cnt.close()
+
+    return JSONResponse(
+        status_code=status.HTTP_200_OK, content=f"Number {number} inserted"
+    )
+
+# Deleting data func
+@server.post("/delete_data/")
+async def delete_data():
+    pgs_cnt = engine.connect()
+
+    pgs_cnt.execute(text("DELETE FROM Numbers;"))
+    
+    pgs_cnt.close()
+
+    return JSONResponse(status_code=status.HTTP_200_OK, content="Data erased")
+
+# Getting data func
+@server.get("/get_data/")
+async def get_data():
+    pgs_cnt = engine.connect()
+
+    data = pd.read_sql("SELECT * FROM Numbers", pgs_cnt)
+    
+    pgs_cnt.close()
+    
+    return JSONResponse(status_code=status.HTTP_200_OK, content=parse_data(data))
+
+#####################
